@@ -150,57 +150,61 @@ def store_and_query_vectors(user_vectors, target_user_id=1, top_k=5):
     finally:
         if conn: conn.close(); print("Database connection closed.")
 
-def generate_similarity_edge_list(user_vectors, similarity_threshold=0.75):
+
+def generate_similarity_edge_list_with_sql(similarity_threshold=0.50):
     """
-    计算所有用户向量之间的余弦相似度，并生成一个带权的边列表。
+    直接使用 SQL 查询在数据库中计算用户相似度，并获取高于阈值的边列表。
 
     Args:
-        user_vectors (dict): {userId: numpy_vector} 的字典。
         similarity_threshold (float): 只保留相似度高于此阈值的边。
 
     Returns:
-        pandas.DataFrame: 包含 'user_id_x', 'user_id_y', 'similarity' 的DataFrame。
+        pandas.DataFrame: 包含 'user_id_x', 'user_id_y', 'similarity' 的DataFrame，
+                          如果出错或没有数据则返回 None。
     """
-    print(f"\n--- Generate graph edge list with method 2. ---")
+    print(f"\n--- Generate graph edge list using SQL (Recommended Method). ---")
     
-    # 将字典转换为ID列表和向量矩阵，确保顺序一致
-    user_ids = list(user_vectors.keys())
-    vectors_matrix = np.array(list(user_vectors.values()))
+    conn = None
+    query = """
+        SELECT
+            t1.user_id AS userId_x,
+            t2.user_id AS userId_y,
+            1 - (t1.profile_vec <=> t2.profile_vec) AS similarity
+        FROM
+            user_vectors t1
+        JOIN
+            user_vectors t2 ON t1.user_id < t2.user_id
+        WHERE
+            1 - (t1.profile_vec <=> t2.profile_vec) >= %s
+        ORDER BY
+            similarity DESC;
+    """
     
-    # 高效计算所有对之间的余弦相似度
-    print("Computing Cosine similarity matrix")
-    cosine_sim_matrix = cosine_similarity(vectors_matrix)
-    
-    # 构建边列表
-    edge_list = []
-    num_users = len(user_ids)
-    
-    # 遍历相似度矩阵的上三角部分，避免重复和自我连接
-    for i in range(num_users):
-        for j in range(i + 1, num_users):
-            similarity = cosine_sim_matrix[i, j]
+    try:
+        db_config = get_db_config()
+        print("Connecting to PostgreSQL DB to compute similarities.")
+        conn = psycopg2.connect(**db_config)
+        register_vector(conn) # 确保 pgvector 类型被识别
+        
+        print(f"Executing query with similarity threshold >= {similarity_threshold}...")
+        
+        # 使用 pandas 直接从 SQL 查询读取数据到 DataFrame
+        similarity_df = pd.read_sql_query(query, conn, params=(similarity_threshold,))
+        
+        if similarity_df.empty:
+            print(f"Warning: with {similarity_threshold} as threshold, no edges were generated from DB.")
+        else:
+            print(f"Successfully generated {len(similarity_df)} edges from database.")
+            print("Top 10 pairs with highest similarity:")
+            print(similarity_df.head(10))
             
-            # 应用阈值，过滤掉权重较低的边
-            if similarity >= similarity_threshold:
-                edge_list.append({
-                    'userId_x': user_ids[i],
-                    'userId_y': user_ids[j],
-                    'similarity': similarity
-                })
-    
-    if not edge_list:
-        print(f"Warning: with {similarity_threshold} as threshold, no edges were generated.")
-        return pd.DataFrame(columns=['userId_x', 'userId_y', 'similarity'])
+        return similarity_df
 
-    # 转换为DataFrame并排序
-    similarity_df = pd.DataFrame(edge_list)
-    similarity_df = similarity_df.sort_values(by='similarity', ascending=False)
-    
-    print(f"Under condition of Threshold > {similarity_threshold}, generated {len(similarity_df)} edges.")
-    print("Top 10 pairs with highest similarity:")
-    print(similarity_df.head(10))
-    
-    return similarity_df
+    except (psycopg2.OperationalError, ValueError) as e:
+        print(f"Error connecting to or querying the database: {e}")
+        return None
+    finally:
+        if conn: conn.close(); print("Database connection closed.")
 
 if __name__ == "__main__":
     RATINGS_FILE = './ml-latest-small/ratings.csv'
@@ -212,11 +216,10 @@ if __name__ == "__main__":
         # 1. 执行数据库查询
         store_and_query_vectors(vectors, target_user_id=1, top_k=5)
 
-        # 2. 生成图的边列表文件
-        # 作业要求“过滤掉比较低的边”，这里的阈值就很重要。
-        user_similarity_graph_m2 = generate_similarity_edge_list(vectors, similarity_threshold=0.50)
-        
-        if not user_similarity_graph_m2.empty:
-            output_path_m2 = 'user_similarity_method2.csv'
-            user_similarity_graph_m2.to_csv(output_path_m2, index=False)
-            print(f"\nMethod 2 Graph data saved to file: {output_path_m2}")
+    print("\nStarting process to generate edge list directly from database using SQL...")
+    user_similarity_graph_m2 = generate_similarity_edge_list_with_sql(similarity_threshold=0.50)
+    
+    if user_similarity_graph_m2 is not None and not user_similarity_graph_m2.empty:
+        output_path_m2 = 'user_similarity_method2.csv'
+        user_similarity_graph_m2.to_csv(output_path_m2, index=False)
+        print(f"\nMethod 2 Graph data saved to file: {output_path_m2}")
