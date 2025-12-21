@@ -5,4 +5,4 @@ venv/
 ml-latest-small/
 
 # 忽略数据集压缩包
-Movielen Datasets.zip
+Movielen datasets.zip
